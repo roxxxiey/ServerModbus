@@ -21,7 +21,7 @@ func New(
 ) *App {
 	gRPCServer := grpc.NewServer()
 
-	grpc_server.RegisterServerMudbus(gRPCServer)
+	grpc_server.RegisterServerModbus(gRPCServer)
 
 	return &App{
 		log:        log,

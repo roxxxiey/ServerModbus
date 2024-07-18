@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/ilyakaznacheev/cleanenv v1.5.0
-	github.com/roxxxiey/proto v0.0.0-20240712074354-7b648b1361e9
+	github.com/roxxxiey/proto v0.0.0-20240718064712-bb3fc628d10e
 	google.golang.org/grpc v1.65.0
 )
 

@@ -7,39 +7,72 @@ import (
 	"github.com/simonvetter/modbus"
 	"google.golang.org/grpc"
 	"log"
+	"net"
 	"strconv"
 	"strings"
 	"time"
 )
 
-type serverModbus struct {
-	pb.UnimplementedPollDriverServer
+type clientModbus struct {
+	pb.UnimplementedPollDriverServiceServer
 }
 
-func RegisterServerMudbus(server *grpc.Server) {
-	pb.RegisterPollDriverServer(server, &serverModbus{})
+var registerType = map[string]modbus.RegType{
+	"Holding_Registers": 0,
+	"Input_Registers":   1,
 }
-func (s *serverModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.PollResponse, error) {
+
+func RegisterServerModbus(server *grpc.Server) {
+	pb.RegisterPollDriverServiceServer(server, &clientModbus{})
+}
+
+func (s *clientModbus) PollType(ctx context.Context, request *pb.PollTypeRequest) (*pb.PollTypeResponse, error) {
+	log.Println("calling pollType")
+	return nil, nil
+}
+
+func (s *clientModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.PollResponse, error) {
 	log.Println("call Poll")
 
 	modbusSettings := request.GetSettings()
+	if modbusSettings == nil {
+		log.Println("error: modbusSettings is nil")
+		return nil, fmt.Errorf("modbusSettings is nil")
+	}
 
-	modbusAddr := modbusSettings[0].GetValue()
-
-	switch modbusAddr {
+	modbusMode := modbusSettings[0].GetValue()
+	modbusAddress, err := strconv.ParseUint(modbusSettings[1].GetValue(), 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("modbusAddress is invalid")
+	}
+	switch modbusMode {
 	case "rtu":
 
 		log.Println("RTU")
-		comport := modbusSettings[1].GetValue()
-		baudrate, err := strconv.ParseUint(modbusSettings[2].GetValue(), 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse baudrate")
+		if len(modbusSettings) != 7 {
+			log.Println("error: len(modbusSettings) != 7")
+			return nil, fmt.Errorf("len(modbusSettings) != 7")
 		}
-		parity, _ := strconv.ParseUint(modbusSettings[3].GetValue(), 10, 32)
-		spotbit, _ := strconv.ParseUint(modbusSettings[4].GetValue(), 10, 32)
-		databit, _ := strconv.ParseUint(modbusSettings[5].GetValue(), 10, 32)
 
-		url := fmt.Sprintf("%s://%s", modbusAddr, comport)
+		comport := modbusSettings[2].GetValue()
+		baudrate, err := strconv.ParseUint(modbusSettings[3].GetValue(), 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse baudrate: %v", err)
+		}
+		parity, err := strconv.ParseUint(modbusSettings[4].GetValue(), 10, 32)
+		if err != nil || checkParity(parity) == false {
+			return nil, fmt.Errorf("failed to parse parity: %v", err)
+		}
+		spotbit, err := strconv.ParseUint(modbusSettings[5].GetValue(), 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse stopbit: %v", err)
+		}
+		databit, err := strconv.ParseUint(modbusSettings[6].GetValue(), 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse databit: %v", err)
+		}
+		log.Printf("settings: %s, %d, %d, %d, %d", comport, baudrate, parity, spotbit, databit)
+		url := fmt.Sprintf("%s://%s", modbusMode, comport)
 		client, err := modbus.NewClient(&modbus.ClientConfiguration{
 			URL:      url,
 			Speed:    uint(baudrate),
@@ -51,25 +84,37 @@ func (s *serverModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 			log.Println("call NewClient error:", err)
 			return nil, err
 		}
+		err = client.SetUnitId(uint8(modbusAddress))
+		if err != nil {
+			log.Println("call SetUnitId error:", err)
+		}
 		err = client.Open()
 		if err != nil {
 			log.Println("call client.Open error:", err)
+			return nil, err
 		}
 		defer client.Close()
 
 		response, err := s.appeal(request, client)
 		if err != nil {
-			log.Fatalf("response err:%v", err)
+			return nil, fmt.Errorf("appeal error: %v", err)
 		}
 		return response, nil
 
 	case "rtuoverudp", "rtuovertcp":
 
-		log.Println("Call OVERTCP")
-		ip := modbusSettings[1].GetValue()
-		port := modbusSettings[2].GetValue()
+		log.Println("Call OVERTCP or OVERUDP")
+		if len(modbusSettings) != 4 {
+			return nil, fmt.Errorf("len(modbusSettings) != 4")
+		}
 
-		url := fmt.Sprintf("%s://%s:%s", modbusAddr, ip, port)
+		ip := modbusSettings[2].GetValue()
+		if isValidIPv4(ip) == false {
+			return nil, fmt.Errorf("invalid ip")
+		}
+		port := modbusSettings[3].GetValue()
+
+		url := fmt.Sprintf("%s://%s:%s", modbusMode, ip, port)
 
 		client, err := modbus.NewClient(&modbus.ClientConfiguration{
 			URL:     url,
@@ -78,6 +123,11 @@ func (s *serverModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 		if err != nil {
 			log.Println("call NewClient error:", err)
 		}
+
+		err = client.SetUnitId(uint8(modbusAddress))
+		if err != nil {
+			return nil, err
+		}
 		err = client.Open()
 		if err != nil {
 			log.Println("call client.Open error:", err)
@@ -86,38 +136,34 @@ func (s *serverModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 		response, err := s.appeal(request, client)
 
 		if err != nil {
-			log.Fatalf("OID() err: %v", err)
+			return nil, fmt.Errorf("response err:%v", err)
 		}
 		return response, nil
 
 	default:
+
 		log.Println("Don't know this protocol")
 	}
 
 	return nil, nil
 }
-func (s *serverModbus) ChangeMetric(ctx context.Context, request *pb.ChangeMetricRequest) (*pb.ChangeMetricResponse, error) {
+
+func (s *clientModbus) ChangeMetric(ctx context.Context, request *pb.ChangeMetricRequest) (*pb.ChangeMetricResponse, error) {
 	log.Println("calling change")
 	return nil, nil
 }
 
-func (s *serverModbus) Preset(ctx context.Context, request *pb.PresetRequest) (*pb.PresetResponse, error) {
+func (s *clientModbus) Preset(ctx context.Context, request *pb.PresetRequest) (*pb.PresetResponse, error) {
 	log.Println("calling preset")
 	return nil, nil
 }
 
-func (s *serverModbus) appeal(request *pb.PollRequest, client *modbus.ModbusClient) (*pb.PollResponse, error) {
+func (s *clientModbus) appeal(request *pb.PollRequest, client *modbus.ModbusClient) (*pb.PollResponse, error) {
 	log.Println("call appeal")
+	pollItems := request.GetPollItems()
 	var data []string
-	for _, item := range request.GetPollItem() {
+	for _, item := range pollItems {
 		data = append(data, item.Addr)
-	}
-	log.Println("data was created")
-	log.Println(data)
-
-	var registerType = map[string]modbus.RegType{
-		"HOLDING_REGISTER": 0,
-		"INPUT_REGISTER":   1,
 	}
 
 	var info []string
@@ -125,78 +171,164 @@ func (s *serverModbus) appeal(request *pb.PollRequest, client *modbus.ModbusClie
 		inf := strings.Split(item, ":")
 		log.Println(inf)
 		regType := inf[3]
-		switch inf[0] {
+		mode := inf[0]
+
+		regAddress, err := strconv.ParseUint(inf[1], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse register address in %s: %v", item, err)
+		}
+
+		quantity, err := strconv.ParseInt(inf[2], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse quantity in %s: %v", item, err)
+		}
+
+		forAdd, err := readRegister(mode, item, regType, uint16(quantity), uint16(regAddress), client)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read register from %s: %v", item, err)
+		}
+		info = append(info, forAdd)
+
+	}
+
+	for i, item := range pollItems {
+		item.Value = &info[i]
+	}
+
+	return &pb.PollResponse{
+		PollItem: pollItems,
+	}, nil
+}
+
+func readRegister(mode string, item string, regType string, quantity uint16, regAddress uint16, client *modbus.ModbusClient) (string, error) {
+	switch regType {
+	case "Output_Coils":
+		switch mode {
 		case "single":
-			regAddress, _ := strconv.ParseUint(inf[1], 10, 32)
-			quantity, err := strconv.ParseInt(inf[2], 10, 32)
-
-			log.Printf("Quantity: %d\n", quantity)
-			log.Printf("Address: %d\n", regAddress)
-
-			if err != nil {
-				fmt.Println("Error parsing integer:", err)
-				continue
-			}
-
 			if quantity == 1 {
-				log.Printf("work quantity == 1")
-				p, _ := client.ReadRegister(uint16(regAddress), registerType[regType])
-				log.Printf("p: %v\n", p)
-				forAdd := strconv.Itoa(int(p))
-				log.Printf("forAdd: %v\n", forAdd)
-				info = append(info, forAdd)
-				log.Printf("info: %v\n", info)
+				read, err := client.ReadCoil(regAddress)
+				return strconv.FormatBool(read), err
 			}
 			if quantity > 1 {
-				read, _ := client.ReadRegisters(uint16(regAddress), uint16(quantity), registerType[regType])
-				log.Printf("read: %v\n", read)
-				strArr := make([]string, len(read))
-				for i, v := range read {
-					log.Printf("Past strArr[%d]: %v\n]", i, strArr[i])
-					strArr[i] = strconv.Itoa(int(v))
-					log.Printf("NOw strArr[%d]: %v\n]", i, strArr[i])
+				read, err := client.ReadCoils(regAddress, quantity)
+				if err != nil {
+					return "", fmt.Errorf("failed to read coils: %v", err)
 				}
-				result := strings.Join(strArr, ",")
-				log.Printf("result: %v\n", result)
-
-				info = append(info, result)
-				log.Printf("info: %v\n", info)
+				return typeConversionBool(read), err
 			}
 		case "multiple":
-			quantity, err := strconv.ParseInt(inf[2], 10, 32)
+			read, err := client.ReadCoils(regAddress, quantity)
 			if err != nil {
-				fmt.Println("Error parsing integer:", err)
-				continue
+				return "", fmt.Errorf("failed to read coils: %v", err)
 			}
-			regAddress, _ := strconv.ParseUint(inf[1], 10, 32)
-
-			read, err := client.ReadRegisters(uint16(regAddress), uint16(quantity), registerType[regType])
-			if err != nil {
-				log.Println("Error reading registers:", err)
-			}
-
-			strArr := make([]string, len(read))
-			for i, v := range read {
-				strArr[i] = strconv.Itoa(int(v))
-			}
-			result := strings.Join(strArr, ",")
-
-			info = append(info, result)
-
+			return typeConversionBool(read), err
 		default:
-			fmt.Println("i don't this modbus mode, i know only `Single` and `Multiple`")
+			return "", fmt.Errorf("unknown modbus mode frame: %v", regType)
+		}
+	case "Input_Contacts":
+		switch mode {
+		case "single":
+			if quantity == 1 {
+				read, err := client.ReadDiscreteInput(regAddress)
+				return strconv.FormatBool(read), err
+			}
+			if quantity > 1 {
+				read, err := client.ReadDiscreteInputs(regAddress, quantity)
+				if err != nil {
+					return "", fmt.Errorf("failed to read contacts: %v", err)
+				}
+				return typeConversionBool(read), err
+			}
+		case "multiple":
+			read, err := client.ReadDiscreteInputs(regAddress, quantity)
+			if err != nil {
+				return "", fmt.Errorf("failed to read contacts: %v", err)
+			}
+			return typeConversionBool(read), err
+		default:
+			return "", fmt.Errorf("unknown modbus mode frame: %v", regType)
+		}
+	case "Holding_Registers", "Input_Registers":
+		switch mode {
+		case "single":
+			if quantity == 1 {
+				p, err := client.ReadRegister(regAddress, registerType[regType])
+				if err != nil {
+					return "", fmt.Errorf("failed to read register %s: %v", item, err)
+				}
+				return strconv.Itoa(int(p)), err
+			}
+			if quantity > 1 {
+				read, err := client.ReadRegisters(regAddress, quantity, registerType[regType])
+				if err != nil {
+					return "", fmt.Errorf("failed to read registers %s: %v", item, err)
+				}
+				return typeConversionUint(read), err
+			}
+		case "multiple":
+			read, err := client.ReadRegisters(regAddress, quantity, registerType[regType])
+			if err != nil {
+				return "", fmt.Errorf("failed to read registers %s: %v", item, err)
+			}
+			return typeConversionUint(read), err
+		default:
+			return "", fmt.Errorf("unknown modbus mode frame: %v", regType)
+		}
+	default:
+		return "", fmt.Errorf("invalid register type: %v", registerType)
+	}
+	return "", nil
+}
+
+func typeConversionUint(read []uint16) string {
+	strArr := make([]string, len(read))
+	for i, v := range read {
+		log.Printf("Past strArr[%d]: %v\n]", i, strArr[i])
+		strArr[i] = strconv.Itoa(int(v))
+		log.Printf("NOw strArr[%d]: %v\n]", i, strArr[i])
+	}
+	return strings.Join(strArr, ",")
+}
+
+func typeConversionBool(read []bool) string {
+	var res []string
+	for _, v := range read {
+
+		res = append(res, strconv.FormatBool(v))
+	}
+	return strings.Join(res, ",")
+}
+
+func checkParity(parity uint64) bool {
+	if parity == 0 || parity == 1 || parity == 2 {
+		return true
+	} else {
+		return false
+	}
+}
+
+func isValidIPv4(ip string) bool {
+	// Проверяем, является ли IP действительным и не является ли он nil
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+
+	// Проверяем, что это IPv4, а не IPv6
+	if strings.Contains(ip, ":") {
+		return false
+	}
+
+	// Проверяем, что IP в формате x.x.x.x и каждая часть от 0 до 255
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if len(part) == 0 || len(part) > 3 {
+			return false
 		}
 	}
 
-	response := &pb.PollResponse{PollValue: make([]*pb.PollValue, len(data))}
-
-	for i, item := range request.GetPollItem() {
-		response.PollValue[i] = &pb.PollValue{
-			Addr:  item.Addr,
-			Name:  item.Name,
-			Value: info[i],
-		}
-	}
-
-	return response, nil
+	return true
 }
