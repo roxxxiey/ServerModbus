@@ -55,22 +55,27 @@ func (s *clientModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 		}
 
 		comport := modbusSettings[2].GetValue()
+
 		baudrate, err := strconv.ParseUint(modbusSettings[3].GetValue(), 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse baudrate: %v", err)
 		}
+
 		parity, err := strconv.ParseUint(modbusSettings[4].GetValue(), 10, 32)
 		if err != nil || checkParity(parity) == false {
 			return nil, fmt.Errorf("failed to parse parity: %v", err)
 		}
+
 		spotbit, err := strconv.ParseUint(modbusSettings[5].GetValue(), 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse stopbit: %v", err)
 		}
+
 		databit, err := strconv.ParseUint(modbusSettings[6].GetValue(), 10, 32)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse databit: %v", err)
 		}
+
 		log.Printf("settings: %s, %d, %d, %d, %d", comport, baudrate, parity, spotbit, databit)
 		url := fmt.Sprintf("%s://%s", modbusMode, comport)
 		client, err := modbus.NewClient(&modbus.ClientConfiguration{
@@ -81,16 +86,16 @@ func (s *clientModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 			DataBits: uint(databit),
 		})
 		if err != nil {
-			log.Println("call NewClient error:", err)
+			fmt.Errorf("call NewClient error:", err)
 			return nil, err
 		}
 		err = client.SetUnitId(uint8(modbusAddress))
 		if err != nil {
-			log.Println("call SetUnitId error:", err)
+			fmt.Errorf("call SetUnitId error:", err)
 		}
 		err = client.Open()
 		if err != nil {
-			log.Println("call client.Open error:", err)
+			fmt.Errorf("call client.Open error:", err)
 			return nil, err
 		}
 		defer client.Close()
@@ -120,8 +125,9 @@ func (s *clientModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 			URL:     url,
 			Timeout: 1 * time.Second,
 		})
+		log.Println(client)
 		if err != nil {
-			log.Println("call NewClient error:", err)
+			fmt.Errorf("call NewClient error:", err)
 		}
 
 		err = client.SetUnitId(uint8(modbusAddress))
@@ -130,9 +136,10 @@ func (s *clientModbus) Poll(ctx context.Context, request *pb.PollRequest) (*pb.P
 		}
 		err = client.Open()
 		if err != nil {
-			log.Println("call client.Open error:", err)
+			fmt.Errorf("call client.Open error:", err)
 		}
 		defer client.Close()
+
 		response, err := s.appeal(request, client)
 
 		if err != nil {
@@ -194,13 +201,14 @@ func (s *clientModbus) appeal(request *pb.PollRequest, client *modbus.ModbusClie
 	for i, item := range pollItems {
 		item.Value = &info[i]
 	}
-
+	//log.Println(pollItems)
 	return &pb.PollResponse{
 		PollItem: pollItems,
 	}, nil
 }
 
 func readRegister(mode string, item string, regType string, quantity uint16, regAddress uint16, client *modbus.ModbusClient) (string, error) {
+	log.Println("Call readRegister")
 	switch regType {
 	case "Output_Coils":
 		switch mode {
@@ -254,6 +262,7 @@ func readRegister(mode string, item string, regType string, quantity uint16, reg
 			if quantity == 1 {
 				p, err := client.ReadRegister(regAddress, registerType[regType])
 				if err != nil {
+
 					return "", fmt.Errorf("failed to read register %s: %v", item, err)
 				}
 				return strconv.Itoa(int(p)), err
@@ -263,6 +272,7 @@ func readRegister(mode string, item string, regType string, quantity uint16, reg
 				if err != nil {
 					return "", fmt.Errorf("failed to read registers %s: %v", item, err)
 				}
+				log.Println(read)
 				return typeConversionUint(read), err
 			}
 		case "multiple":
@@ -270,6 +280,7 @@ func readRegister(mode string, item string, regType string, quantity uint16, reg
 			if err != nil {
 				return "", fmt.Errorf("failed to read registers %s: %v", item, err)
 			}
+			log.Println(read)
 			return typeConversionUint(read), err
 		default:
 			return "", fmt.Errorf("unknown modbus mode frame: %v", regType)
